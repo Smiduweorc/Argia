@@ -2,7 +2,7 @@
 // tests and quoted in the README. Not shipped: Argia owns no adapters.
 import type pg from "pg";
 
-import type { Deletion, Hit, Point, VectorStore } from "../../index.js";
+import type { Deletion, Hit, Point, StoredVersion, VectorStore } from "../../index.js";
 
 export type Meta = { source: string };
 export type Filter = { source?: string };
@@ -61,6 +61,17 @@ export async function pgvectorStore(pool: pg.Pool, table: string, dimensions: nu
 				WHERE stored.version <= excluded.version`,
 				[deletions.map((d) => d.id), deletions.map((d) => d.version)],
 			);
+		},
+		async versions(ids: string[]): Promise<(StoredVersion | null)[]> {
+			// WITH ORDINALITY keeps the caller's order, and the left join turns an unknown id into a null row.
+			const { rows } = await pool.query<{ version: number | null; deleted: boolean | null }>(
+				`SELECT stored.version, stored.deleted
+				FROM unnest($1::text[]) WITH ORDINALITY AS asked(id, n)
+				LEFT JOIN ${table} AS stored ON stored.id = asked.id
+				ORDER BY asked.n`,
+				[ids],
+			);
+			return rows.map((row) => (row.version === null ? null : { version: row.version, deleted: row.deleted === true }));
 		},
 	};
 }

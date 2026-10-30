@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 
 import * as argia from "argia-migrator";
 
-test("the built package exports exactly Migration and ArgiaError", () => {
-	assert.deepEqual(Object.keys(argia).sort(), ["ArgiaError", "Migration"]);
+test("the built package exports exactly Migration, ArgiaError and overlap", () => {
+	assert.deepEqual(Object.keys(argia).sort(), ["ArgiaError", "Migration", "overlap"]);
 });
 
 test("the built Migration routes a write to both profiles", async () => {

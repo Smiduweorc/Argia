@@ -13,6 +13,8 @@ interface Faults {
 	tiesIgnored?: boolean;
 	dropsMetadata?: boolean;
 	returnsDeleted?: boolean;
+	versionsUnordered?: boolean;
+	withVersions?: boolean;
 }
 
 // A store that keeps the contract unless told which part of it to break.
@@ -41,6 +43,15 @@ function store(faults: Faults = {}): VectorStore<Meta, string> & { filters: (str
 				.slice(0, k)
 				.map(({ point }) => ({ id: point.id, score: 1, ...(faults.dropsMetadata ? {} : { metadata: point.metadata }) }));
 		},
+		...(faults.withVersions || faults.versionsUnordered ? {
+			async versions(ids: string[]) {
+				const answer = ids.map((id) => {
+					const row = rows.get(id);
+					return row === undefined ? null : { version: row.point.version, deleted: row.deleted };
+				});
+				return faults.versionsUnordered ? answer.reverse() : answer;
+			},
+		} : {}),
 		async delete(deletions: Deletion[]) {
 			for (const { id, version } of deletions) {
 				const write = wins(id, version);
@@ -189,4 +200,10 @@ test("the options are validated before the store is touched", async () => {
 
 test("errors from other codes carry an empty failures list", () => {
 	assert.deepEqual(new ArgiaError("invalid_k", "k").failures, []);
+});
+
+test("a store with a correct versions method passes, one that answers out of order fails only that check", async () => {
+	await checkVectorStore(options(store({ withVersions: true })));
+	await assert.rejects(checkVectorStore(options(store({ versionsUnordered: true }))),
+		(error) => error instanceof ArgiaError && error.failures.length > 0 && error.failures.every((line) => line.startsWith("versions:")));
 });
