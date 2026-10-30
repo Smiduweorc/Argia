@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-10-30
+
+### Bug Fixes
+
+- Removed v22 of node from CI
+- Corrected treatment of 0 and -0
+
+### Features
+
+- Add overlap metrics, drift detection and unsupported_store error
+
 ## [0.1.0] - 2026-10-30
 
 ### Documentation
