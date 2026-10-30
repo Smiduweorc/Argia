@@ -118,9 +118,10 @@ export async function checkVectorStore<M, F = unknown>(options: ConformanceOptio
 	}
 }
 
-// Stores hand metadata back after a round trip through their own serialisation, so key order is not significant.
+// Stores hand metadata back after a round trip through their own serialisation, so key order is not significant
+// and -0 comes back as 0 (JSON has no negative zero).
 function sameMetadata(a: unknown, b: unknown): boolean {
-	if (Object.is(a, b)) {
+	if (a === b || Object.is(a, b)) {
 		return true;
 	}
 	if (typeof a !== "object" || typeof b !== "object" || a === null || b === null || Array.isArray(a) !== Array.isArray(b)) {
