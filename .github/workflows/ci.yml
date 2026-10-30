@@ -56,12 +56,12 @@ jobs:
         run: npm run test:dist
 
       - name: Generate API docs
-        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22.x'
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x'
         run: npm run docs
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
-        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22.x'
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x'
         with:
           name: dist
           path: dist/

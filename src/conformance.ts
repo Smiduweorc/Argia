@@ -1,5 +1,5 @@
 import { ArgiaError } from "./errors.js";
-import type { Hit, VectorStore } from "./migration.js";
+import type { Hit, StoredVersion, VectorStore } from "./migration.js";
 
 export interface ConformanceOptions<M, F> {
 	/** The adapter under test. Point it at an empty scratch table or collection: the check writes, deletes and leaves tombstones behind. */
@@ -33,6 +33,8 @@ export interface ConformanceOptions<M, F> {
  * | `concurrent-writes`    | v20 down to v1, all at once                     | v20 kept           |
  * | `concurrent-delete`    | v1, then delete v3 and write v2 at once         | gone               |
  * | `delete-missing`       | delete of an id never written                   | no error           |
+ * | `versions`             | (only if the store has `versions`) asks for the | each id's stored   |
+ * |                        | ids above, plus one never written, in one call  | state, in order    |
  *
  * Every point shares one vector and queries ask for 10 hits, so a store
  * holding other rows with that exact vector can push the test rows out.
@@ -112,6 +114,28 @@ export async function checkVectorStore<M, F = unknown>(options: ConformanceOptio
 	await gone("concurrent-delete", id("concurrent-delete"));
 
 	await store.delete([{ id: id("delete-missing"), version: 1 }]);
+
+	if (typeof store.versions === "function") {
+		// Asked out of write order, so a store that returns rows in its own order instead of the ids' order fails.
+		const asked: [string, StoredVersion | null][] = [
+			[id("write-at-delete"), { version: 3, deleted: false }],
+			[id("never-written"), null],
+			[id("delete"), { version: 2, deleted: true }],
+			[id("stale-write"), { version: 2, deleted: false }],
+		];
+		const answer: unknown = await store.versions(asked.map(([askedId]) => askedId));
+		if (!Array.isArray(answer) || answer.length !== asked.length) {
+			failures.push(`versions: expected ${asked.length} entries, one per id, got ${JSON.stringify(answer)}`);
+		} else {
+			asked.forEach(([askedId, expected], i) => {
+				const got = answer[i] as StoredVersion | null | undefined;
+				const same = expected === null ? got === null : got?.version === expected.version && got.deleted === expected.deleted;
+				if (!same) {
+					failures.push(`versions: "${askedId}" came back as ${JSON.stringify(got)}; expected ${JSON.stringify(expected)}`);
+				}
+			});
+		}
+	}
 
 	if (failures.length > 0) {
 		throw new ArgiaError("nonconformant_store", `the store breaks the version contract:\n${failures.join("\n")}`, { failures });

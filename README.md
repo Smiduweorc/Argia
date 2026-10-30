@@ -18,16 +18,17 @@ logged, no environment variables are read.
 - want to copy vectors from one database to another without re-embedding.
   Argia always embeds with each profile's own model; a byte copy is a job for
   your databases' export and import tools.
-- need the phase shared across a fleet. The phase lives in one `Migration`
-  object in one process. Twenty replicas are twenty phases, and moving them
-  together is your deploy's job (an environment variable read by your code,
-  a config push).
+- need Argia to share the phase across a fleet. The phase lives in one
+  `Migration` object in one process, so twenty replicas are twenty phases.
+  You can drive them all from a flag or config store you already run; see
+  [Running more than one replica](#running-more-than-one-replica).
 - want retries or timeouts on embedding or store calls. Wrap your `embed` and
   store methods with Firefly Limiter (`firefly-limiter`), or outside
   Smiduweorc with `cockatiel` (retries, breakers, timeouts, bulkheads),
   `p-retry` for retries alone, or `opossum` for a circuit breaker.
-- want a recall score computed for you. The `compare` phase hands you both hit
-  lists; which metric means "ready" is yours.
+- want Argia to decide when you are ready. The `compare` phase hands you
+  both hit lists and `overlap` turns them into numbers, but which threshold
+  means "ready" is up to you.
 
 ## How it works
 
@@ -55,6 +56,14 @@ The phase decides where each call goes:
   hit lists, scores included, through `onEvent`.
 - `backfill` embeds and writes to the `to` profile only, in any phase, so
   filling the new index does not re-embed everything the old one holds.
+- `writeOrder: "parallel"` (optional) starts both writes at once instead of
+  read side first. A dual write then takes as long as the slower store, not
+  both together. The tradeoff: a write the read side refused may still land
+  on the shadow. The call throws and your retry rewrites the same version,
+  so the stores end up equal.
+- `diff(ids)` asks both stores what they hold for each id and returns the
+  ones that disagree. It is how you find what `shadowWriteFailure: "report"`
+  left behind; see [Finding and repairing gaps](#finding-and-repairing-gaps).
 - `query(text, k, filter)` hands `filter` to your store adapter untouched, on
   both sides when compared.
 - Every document and delete carries a `version`, and a store keeps the
@@ -70,12 +79,12 @@ The phase decides where each call goes:
 
 ## Quick start
 
-1. Install: `npm install argia-migrator`. Node 22 or later, ESM only.
+1. Install: `npm install argia-migrator`. Node 24 or later, ESM only.
 2. Describe both profiles and choose the failure policy. `openaiEmbed`,
    `cohereEmbed`, `pgvectorStore` and `metrics` stand for your own code:
 
 ```ts
-import { Migration, type Profile } from "argia-migrator";
+import { Migration, overlap, type Profile } from "argia-migrator";
 
 type Meta = { source: string };
 type Filter = { source?: string };
@@ -102,13 +111,25 @@ const migration = new Migration({
 	compareRate: 0.1,
 	onEvent: (event) => {
 		if (event.type === "compare") {
-			const before = new Set(event.from.map((hit) => hit.id));
-			const overlap = event.to.filter((hit) => before.has(hit.id)).length;
-			metrics.observe("argia.overlap", overlap / event.k);
+			const { recall, rankOverlap } = overlap(event.from, event.to);
+			metrics.observe("argia.recall", recall);
+			metrics.observe("argia.rank_overlap", rankOverlap);
 		}
 	},
 });
 ```
+
+`overlap` compares ids and ranks, never scores. It returns:
+
+- `recall`: the share of today's hits that the new index also returns.
+- `rankOverlap`: rank-biased overlap, which weights agreement at the top
+  more than agreement at the bottom.
+- `topMatch` and `shared`.
+
+A common starting point is to wait until the median `recall` stays above a
+level you pick over a week of real traffic, then read a sample of the
+queries where it is lowest. The new model can legitimately disagree and be
+right, which is why no number is final.
 
 3. Route your ingestion and retrieval through it (`row`, `chunk` and
    `question` come from your own code):
@@ -125,7 +146,8 @@ const hits = await migration.query(question, 8, { source: "doc-1" });
 5. `migration.setPhase("compare")`, watch the events, then `"to"`, then
    `"to-only"` once you no longer want the way back.
 
-A store adapter is three methods (`upsert`, `query`, `delete`); see
+A store adapter is three methods (`upsert`, `query`, `delete`), plus an
+optional `versions` for `diff`; see
 `VectorStore` in the API docs. Each profile needs its own store object,
 pointing at its own table, index or collection.
 
@@ -161,11 +183,98 @@ store must return each point's metadata unchanged in its hits; that is how
 the check tells which copy was kept. It leaves its rows and tombstones
 behind.
 
+## Finding and repairing gaps
+
+With `shadowWriteFailure: "report"`, a failed shadow write leaves the
+shadow store missing documents until they are written again. To find them,
+give your adapter an optional fourth method, `versions(ids)`. It returns,
+for each id in order, `{ version, deleted }` or `null` if the store has
+never seen it. Then walk your source ids in batches:
+
+```ts
+for await (const ids of sourceIdBatches(500)) {
+	const drift = await migration.diff(ids);
+	if (drift.length > 0) {
+		// Re-read from the source, which is the truth, and write again.
+		// The version rule makes rewriting an up-to-date copy harmless.
+		await migration.write(await loadDocuments(drift.map((d) => d.id)));
+	}
+}
+```
+
+Each entry says what each side holds, so you can tell a missing document
+(`to: null`) from a stale one (`to.version` lower) or a delete that did not
+land (`from.deleted !== to.deleted`). Documents deleted at the source show
+up the same way, so send those to `migration.delete` instead.
+
+`diff` is a snapshot. A write that runs at the same moment can show up as
+drift and be gone a second later, so check again before acting on a short
+list. Run it before leaving `to` for `to-only`. After `to-only` the old
+store stops receiving writes, so drift there is expected.
+
+The conformance check also tests `versions` when your adapter has it, and
+the pgvector fixture implements it.
+
+## Running more than one replica
+
+Argia has no shared phase, but `setPhase` is a plain method, so you can
+drive it from a feature-flag service, a config service, a database row,
+Redis, etcd or Consul. Each replica reads the shared value before
+constructing `Migration` (pass it as `phase`), then polls or subscribes
+and calls `setPhase` when it changes.
+
+Propagation is never atomic. Replicas learn about a change at different
+times, depending on the poll interval, pub/sub lag and requests already in
+flight. A shared store shrinks that window but does not close it. Only one
+transition is dangerous:
+
+- `from`, `compare` and `to` all write to both stores, so replicas can move
+  between them in any order. While replicas disagree, they read from
+  different sides, but both sides stay current.
+- `to-only` is the cliff. Once one replica stops writing to the old store,
+  any replica still reading from it serves stale results.
+
+So:
+
+1. Leave every replica in `to` for longer than your worst-case propagation
+   time (poll interval plus the longest in-flight request) before any
+   replica enters `to-only`. For more certainty, have each replica report
+   its `migration.phase` (a heartbeat or a metric), and only switch to
+   `to-only` once all of them show `to`.
+2. If the shared store is unreachable at startup, fall back to a phase that
+   writes to both sides, never `to-only`.
+3. If it goes down while running, keep the last known phase rather than
+   resetting it.
+4. Validate the value before calling `setPhase`. An unknown phase throws.
+
+You can also skip `to-only`. `to` already reads from the new index and
+keeps the old one as a safety net. All `to-only` saves you is the second
+write and its embedding cost. If that cost is tolerable, stay in `to` and
+retire the old store with an ordinary deploy that removes the `from`
+profile. That deploy has its own rollout, but your deploy tooling already
+knows how to handle it.
+
+## Compare events and sensitive queries
+
+`compare` and `shadow_query_failed` events carry the query text. If your
+queries can contain personal or confidential data, your listener and
+whatever it logs to will see that text. Pass `redactText` to rewrite it
+first. For example, return `""` to drop it, or a hash to group repeats:
+
+```ts
+import { createHash } from "node:crypto";
+
+redactText: (text) => createHash("sha256").update(text).digest("hex").slice(0, 16),
+```
+
+If `redactText` throws, the event is dropped rather than sent with the raw
+text.
+
 ## Where it sits
 
-No other library does this job, as far as we could find. The pattern is
-written up as a procedure, and Argia is that procedure turned into code
-that runs against any store.
+We found no other library that does this job, though we have not searched
+exhaustively. The pattern exists as a written procedure, and Argia turns
+that procedure into code that runs against any store.
 
 - [Qdrant's migration tutorial](https://qdrant.tech/documentation/tutorials-operations/embedding-model-migration/)
   lays out the same steps by hand for Qdrant: a second collection, dual
@@ -179,19 +288,21 @@ that runs against any store.
 
 ## Known quirks
 
-- The two writes run one after the other, so a dual write takes as long as
-  both together. That ordering is what keeps a refused write out of the
-  shadow store.
+- By default the two writes run one after the other, so a dual write takes
+  as long as both together. That ordering is what keeps a refused write out
+  of the shadow store. `writeOrder: "parallel"` trades that guarantee for
+  latency.
 - If the primary write succeeds and the shadow write fails, the shadow store
   misses those documents until they are written again, which is why upserts
-  must be idempotent.
+  must be idempotent. `diff` finds them.
 - A compared query waits for both stores, so it takes as long as the slower
   one. `compareRate` limits how many queries pay that.
 - Tombstones pile up. Purging them is your adapter's job; purge one only once
   no write older than it can still arrive.
 - Argia cannot see your other replicas. Move every replica to `to` before any
   goes to `to-only`, or a replica still reading the old store misses the
-  writes the `to-only` ones stopped sending it.
+  writes the `to-only` ones stopped sending it. See
+  [Running more than one replica](#running-more-than-one-replica).
 - Scores from two different models are not on one scale; compare ids and
   ranks, not raw scores.
 - `embed` receives every text of a `write` or `backfill` call at once. Split
@@ -228,8 +339,8 @@ ISC.
 ## Lore
 
 Argia are the dancer damselflies. They spend their larval life underwater and
-their adult life in the air, and the move from one to the other happens in a
-single molt on a reed stem. The old skin stays clinging to the reed for a
+their adult life in the air, and the move from one to the other happens in the
+final molt, on a reed stem. The old skin stays clinging to the reed for a
 while afterwards, which is the `to` phase.
 
 

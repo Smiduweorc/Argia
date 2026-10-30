@@ -41,6 +41,15 @@ function store(name: string, log: string[]): Store {
 			if (s.fail) throw s.fail;
 			return [...points.keys()].sort().slice(0, k).map((id, i) => ({ id, score: 1 - i / 10 }));
 		},
+		async versions(ids) {
+			if (s.fail) throw s.fail;
+			return ids.map((id) => {
+				const point = points.get(id);
+				if (point !== undefined) return { version: point.version, deleted: false };
+				const tombstone = tombstones.get(id);
+				return tombstone === undefined ? null : { version: tombstone, deleted: true };
+			});
+		},
 		async delete(deletions) {
 			log.push(`${name}.delete`);
 			if (s.fail) throw s.fail;
@@ -660,4 +669,115 @@ test("only the documented fields of a document reach the store", async () => {
 	const { migration, to } = build();
 	await migration.write([{ id: "a", version: 1, text: "ants", tenant: "secret" } as never]);
 	assert.deepEqual(Object.keys(to.store.points.get("a") ?? {}).sort(), ["id", "text", "vector", "version"]);
+});
+
+test("parallel writes start the other side without waiting for the read side", async () => {
+	let open!: () => void;
+	const gate = new Promise<void>((resolve) => { open = resolve; });
+	const from = profile("ada-002", 3, async (texts) => { await gate; return texts.map(() => [0, 0, 0]); });
+	const { migration, to } = build({ from, writeOrder: "parallel" });
+	const running = migration.write(docs);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual([...to.store.points.keys()], ["a", "b"]);
+	open();
+	await running;
+	assert.deepEqual([...from.store.points.keys()], ["a", "b"]);
+});
+
+test("a parallel write throws the read side's error, and still reports the shadow's", async () => {
+	const { migration, from, to, events } = build({ writeOrder: "parallel", shadowWriteFailure: "report" });
+	const readError = new Error("from upsert");
+	const shadowError = new Error("to upsert");
+	from.store.fail = readError;
+	to.store.fail = shadowError;
+	await assert.rejects(migration.write(docs), (error) => error === readError);
+	assert.deepEqual(events, [{ type: "shadow_write_failed", operation: "write", profile: "embed-v4", ids: ["a", "b"], error: shadowError }]);
+});
+
+test("a parallel write honours shadowWriteFailure for the shadow side", async () => {
+	for (const policy of ["throw", "report"] as const) {
+		const { migration, to, events } = build({ writeOrder: "parallel", shadowWriteFailure: policy });
+		const boom = new Error("to upsert");
+		to.store.fail = boom;
+		if (policy === "throw") {
+			await assert.rejects(migration.write(docs), (error) => error === boom);
+		} else {
+			await migration.write(docs);
+		}
+		assert.equal(events.length, 1, policy);
+	}
+});
+
+test("parallel deletes reach both stores, and to-only still touches only the to store", async () => {
+	const { migration, from, to } = build({ writeOrder: "parallel" });
+	await migration.write(docs);
+	await migration.delete([{ id: "a", version: 2 }]);
+	assert.deepEqual([...from.store.points.keys()], ["b"]);
+	assert.deepEqual([...to.store.points.keys()], ["b"]);
+	migration.setPhase("to-only");
+	await migration.write([{ id: "c", version: 1, text: "cicadas" }]);
+	assert.deepEqual([...from.store.points.keys()], ["b"]);
+	assert.deepEqual([...to.store.points.keys()], ["b", "c"]);
+});
+
+test("writeOrder and redactText are validated", () => {
+	for (const overrides of [{ writeOrder: "both" }, { redactText: "hash" }] as unknown as Partial<MigrationOptions<{ tag: string }, string>>[]) {
+		assert.throws(() => build(overrides), code("invalid_options"));
+	}
+});
+
+test("redactText rewrites the text of compare and shadow_query_failed events", async () => {
+	const { migration, to, events } = build({ phase: "compare", redactText: (text) => `len:${text.length}` });
+	await migration.query("secret", 1);
+	to.store.fail = new Error("to is down");
+	await migration.query("secret", 1);
+	assert.deepEqual(events.map((event) => event.type === "shadow_write_failed" ? undefined : event.text), ["len:6", "len:6"]);
+});
+
+test("a redactText that throws drops the event rather than leak the raw text", async () => {
+	const { migration, events } = build({ phase: "compare", redactText: () => { throw new Error("broken"); } });
+	assert.deepEqual(await migration.query("secret", 1), []);
+	assert.deepEqual(events, []);
+});
+
+test("diff returns only the ids whose stores disagree, with both sides' state", async () => {
+	const { migration, from, to } = build({ shadowWriteFailure: "report" });
+	await migration.write(docs);
+	to.store.fail = new Error("to is down");
+	await migration.write([{ id: "a", version: 2, text: "ants v2" }, { id: "c", version: 1, text: "cicadas" }]);
+	await migration.delete([{ id: "b", version: 2 }]);
+	to.store.fail = undefined;
+	assert.deepEqual(await migration.diff(["a", "b", "c", "never"]), [
+		{ id: "a", from: { version: 2, deleted: false }, to: { version: 1, deleted: false } },
+		{ id: "b", from: { version: 2, deleted: true }, to: { version: 1, deleted: false } },
+		{ id: "c", from: { version: 1, deleted: false }, to: null },
+	]);
+	await migration.write([{ id: "a", version: 2, text: "ants v2" }, { id: "c", version: 1, text: "cicadas" }]);
+	await migration.delete([{ id: "b", version: 2 }]);
+	assert.deepEqual(await migration.diff(["a", "b", "c"]), []);
+	assert.equal(from.store.points.get("a")?.text, "ants v2");
+});
+
+test("diff refuses a store without versions, and bad ids, before calling anything", async () => {
+	const { migration, to } = build();
+	await assert.rejects(migration.diff(["a", "a"]), code("duplicate_id"));
+	await assert.rejects(migration.diff([""]), code("invalid_id"));
+	(to.store as Partial<Store>).versions = undefined;
+	await assert.rejects(migration.diff(["a"]), (error) => error instanceof ArgiaError && error.code === "unsupported_store" && error.profile === "embed-v4");
+	assert.deepEqual(await build().migration.diff([]), []);
+});
+
+test("diff refuses a versions answer that breaks the contract", async () => {
+	for (const answer of [[], [{ version: 1 }], [{ version: Number.NaN, deleted: false }], "nope"] as unknown[]) {
+		const { migration, to } = build();
+		to.store.versions = async () => answer as [];
+		await assert.rejects(migration.diff(["a"]), code("invalid_store_result"), JSON.stringify(answer));
+	}
+});
+
+test("diff passes store errors through unchanged", async () => {
+	const { migration, from } = build();
+	const boom = new Error("from is down");
+	from.store.fail = boom;
+	await assert.rejects(migration.diff(["a"]), (error) => error === boom);
 });

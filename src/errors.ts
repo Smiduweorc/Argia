@@ -9,7 +9,8 @@ export type ArgiaErrorCode =
 	| "embedding_dimension_mismatch"
 	| "embedding_not_finite"
 	| "invalid_store_result"
-	| "nonconformant_store";
+	| "nonconformant_store"
+	| "unsupported_store";
 
 /**
  * Argia's own refusals. An error thrown by your embed function or your store
@@ -18,7 +19,7 @@ export type ArgiaErrorCode =
 export class ArgiaError extends Error {
 	override readonly name = "ArgiaError";
 	readonly code: ArgiaErrorCode;
-	/** The profile whose output was refused, for the embedding codes and `invalid_store_result`. */
+	/** The profile whose output was refused, for the embedding codes, `invalid_store_result` and `unsupported_store`. */
 	readonly profile: string | undefined;
 	/** The offending document id, for `invalid_id`, `duplicate_id` and `invalid_version`. */
 	readonly documentId: string | undefined;

@@ -25,6 +25,19 @@ export interface Point<M> extends Document<M> {
 	readonly vector: number[];
 }
 
+/** What a store holds for one id: the version it kept, and whether that version is a tombstone. */
+export interface StoredVersion {
+	readonly version: number;
+	readonly deleted: boolean;
+}
+
+/** One id whose two stores disagree, as {@link Migration.diff} reports it. `null` means the store has never seen the id. */
+export interface Drift {
+	readonly id: string;
+	readonly from: StoredVersion | null;
+	readonly to: StoredVersion | null;
+}
+
 export interface Hit<M> {
 	readonly id: string;
 	readonly score: number;
@@ -59,6 +72,12 @@ export interface VectorStore<M, F = unknown> {
 	 * exist are not an error.
 	 */
 	delete(deletions: Deletion[]): Promise<void>;
+	/**
+	 * Optional; needed only by {@link Migration.diff}. One entry per id, in the
+	 * same order: the stored version and whether it is a tombstone, or `null`
+	 * for an id the store has never seen (or whose tombstone was purged).
+	 */
+	versions?(ids: string[]): Promise<(StoredVersion | null)[]>;
 }
 
 /** One embedding model and the store that holds its vectors. */
@@ -120,6 +139,24 @@ export interface MigrationOptions<M, F = unknown> {
 	 */
 	readonly shadowWriteFailure: "throw" | "report";
 	/**
+	 * How a dual write or delete reaches the two sides. `sequential` (the
+	 * default) writes the read side first and the other side only if that
+	 * succeeded, so a dual write takes as long as both together. `parallel`
+	 * starts both at once and takes as long as the slower one; a write the read
+	 * side refused may then still land on the other side. That is harmless
+	 * under the version contract, since the call throws and your retry rewrites
+	 * the same version, but the shadow can briefly hold a copy the read side
+	 * does not. Failures are handled the same way in both modes.
+	 */
+	readonly writeOrder?: "sequential" | "parallel";
+	/**
+	 * Applied to the query text before it is put in a `compare` or
+	 * `shadow_query_failed` event, so a listener never sees raw user input.
+	 * Return `""` to drop it, or a hash to group repeats. If it throws, the
+	 * event is not sent. Defaults to passing the text through unchanged.
+	 */
+	readonly redactText?: (text: string) => string;
+	/**
 	 * The fraction of queries in the `compare` phase that also query the other
 	 * side, from 0 to 1. A compared query costs a second embedding call and a
 	 * second store query, and waits for the slower of the two. 1 compares
@@ -141,12 +178,16 @@ export interface MigrationOptions<M, F = unknown> {
 /**
  * Sends writes and reads to two embedding profiles according to the current
  * phase. One instance per process; the phase lives in memory, so every
- * process in a fleet must be moved separately.
+ * process in a fleet must be moved separately. The README's "Running more than
+ * one replica" section covers driving {@link Migration.setPhase} from a shared
+ * flag or config store.
  */
 export class Migration<M = unknown, F = unknown> {
 	readonly #from: Profile<M, F>;
 	readonly #to: Profile<M, F>;
 	readonly #shadowWriteFailure: "throw" | "report";
+	readonly #writeOrder: "sequential" | "parallel";
+	readonly #redactText: ((text: string) => string) | undefined;
 	readonly #compareRate: number;
 	readonly #onEvent: ((event: MigrationEvent<M>) => void) | undefined;
 	readonly #random: () => number;
@@ -168,6 +209,12 @@ export class Migration<M = unknown, F = unknown> {
 		if (options.shadowWriteFailure !== "throw" && options.shadowWriteFailure !== "report") {
 			throw new ArgiaError("invalid_options", "shadowWriteFailure is required; pass \"throw\" or \"report\"");
 		}
+		if (options.writeOrder !== undefined && options.writeOrder !== "sequential" && options.writeOrder !== "parallel") {
+			throw new ArgiaError("invalid_options", `writeOrder must be "sequential" or "parallel" (got ${String(options.writeOrder)})`);
+		}
+		if (options.redactText !== undefined && typeof options.redactText !== "function") {
+			throw new ArgiaError("invalid_options", "redactText must be a function");
+		}
 		if (typeof options.compareRate !== "number" || !(options.compareRate >= 0 && options.compareRate <= 1)) {
 			throw new ArgiaError("invalid_options", `compareRate is required and must be between 0 and 1 (got ${String(options.compareRate)}); pass 1 to compare every query`);
 		}
@@ -181,6 +228,8 @@ export class Migration<M = unknown, F = unknown> {
 		this.#to = options.to;
 		this.#phase = options.phase;
 		this.#shadowWriteFailure = options.shadowWriteFailure;
+		this.#writeOrder = options.writeOrder ?? "sequential";
+		this.#redactText = options.redactText;
 		this.#compareRate = options.compareRate;
 		this.#onEvent = options.onEvent;
 		this.#random = options.random ?? Math.random;
@@ -198,8 +247,9 @@ export class Migration<M = unknown, F = unknown> {
 
 	/**
 	 * Embeds each document with every profile the phase writes to, and upserts
-	 * the vectors. The side being read goes first; the other side is written
-	 * only if that succeeds, so it never holds a write the read side refused.
+	 * the vectors. With the default `writeOrder`, the side being read goes
+	 * first and the other side is written only if that succeeds, so it never
+	 * holds a write the read side refused.
 	 */
 	async write(documents: readonly Document<M>[]): Promise<void> {
 		const plan = route(this.#phase);
@@ -224,7 +274,7 @@ export class Migration<M = unknown, F = unknown> {
 		await upsert(this.#to, documents);
 	}
 
-	/** Deletes from every store the phase writes to, the side being read first. */
+	/** Deletes from every store the phase writes to, the side being read first unless `writeOrder` is `parallel`. */
 	async delete(deletions: readonly Deletion[]): Promise<void> {
 		const plan = route(this.#phase);
 		checkEntries(deletions, "delete");
@@ -255,32 +305,98 @@ export class Migration<M = unknown, F = unknown> {
 			throw primary.reason;
 		}
 		if (shadow.status === "rejected") {
-			this.#emit({ type: "shadow_query_failed", profile: other.name, text, error: shadow.reason });
+			this.#emitWithText(text, (shown) => ({ type: "shadow_query_failed", profile: other.name, text: shown, error: shadow.reason }));
 		} else {
 			const [fromHits, toHits] = plan.read === "from" ? [primary.value, shadow.value] : [shadow.value, primary.value];
-			this.#emit({ type: "compare", text, k, from: fromHits, to: toHits });
+			this.#emitWithText(text, (shown) => ({ type: "compare", text: shown, k, from: fromHits, to: toHits }));
 		}
 		return primary.value;
 	}
 
+	/**
+	 * Asks both stores what they hold for each id and returns the ids where
+	 * they disagree: a different version, or one side deleted and the other
+	 * not. Use it to find what a reported shadow failure left behind, then
+	 * `write` (or `delete`) those ids again from your source; the version rule
+	 * makes rewriting a copy a store already has harmless.
+	 *
+	 * Pass ids in batches your stores can answer in one call. Both stores need
+	 * `versions`. The result is a snapshot: a write running at the same time
+	 * can show up as drift that is gone a moment later, so check again before
+	 * acting on a short list. After `to-only` the old store stops receiving
+	 * writes, so drift there is expected.
+	 */
+	async diff(ids: readonly string[]): Promise<Drift[]> {
+		checkEntries(ids.map((id) => ({ id, version: 0 })), "diff");
+		for (const profile of [this.#from, this.#to]) {
+			if (typeof profile.store.versions !== "function") {
+				throw new ArgiaError("unsupported_store", `profile "${profile.name}" store has no versions method; diff needs it on both stores`, { profile: profile.name });
+			}
+		}
+		if (ids.length === 0) {
+			return [];
+		}
+		const [fromVersions, toVersions] = await Promise.all([versions(this.#from, ids), versions(this.#to, ids)]);
+		const drift: Drift[] = [];
+		ids.forEach((id, i) => {
+			const from = fromVersions[i] as StoredVersion | null;
+			const to = toVersions[i] as StoredVersion | null;
+			if (from?.version !== to?.version || from?.deleted !== to?.deleted) {
+				drift.push({ id, from, to });
+			}
+		});
+		return drift;
+	}
+
 	async #inOrder(operation: "write" | "delete", read: Side, sides: readonly Side[], ids: readonly string[], run: (profile: Profile<M, F>) => Promise<void>): Promise<void> {
+		const shadows = sides.filter((side) => side !== read).map((side) => this.#profile(side));
+		const fail = (profile: Profile<M, F>, error: unknown): void => {
+			this.#emit({ type: "shadow_write_failed", operation, profile: profile.name, ids: [...ids], error });
+		};
+		if (this.#writeOrder === "parallel") {
+			const [primary, ...rest] = await Promise.allSettled([sides.includes(read) ? run(this.#profile(read)) : Promise.resolve(), ...shadows.map(run)]);
+			// Every shadow failure is reported, even when the read side's failure is the one thrown.
+			let rethrow: { error: unknown } | undefined;
+			rest.forEach((result, i) => {
+				if (result.status === "rejected") {
+					fail(shadows[i] as Profile<M, F>, result.reason);
+					rethrow ??= { error: result.reason };
+				}
+			});
+			if (primary?.status === "rejected") {
+				throw primary.reason;
+			}
+			if (rethrow !== undefined && this.#shadowWriteFailure === "throw") {
+				throw rethrow.error;
+			}
+			return;
+		}
 		if (sides.includes(read)) {
 			await run(this.#profile(read));
 		}
-		for (const side of sides) {
-			if (side === read) {
-				continue;
-			}
-			const profile = this.#profile(side);
+		for (const profile of shadows) {
 			try {
 				await run(profile);
 			} catch (error) {
-				this.#emit({ type: "shadow_write_failed", operation, profile: profile.name, ids: [...ids], error });
+				fail(profile, error);
 				if (this.#shadowWriteFailure === "throw") {
 					throw error;
 				}
 			}
 		}
+	}
+
+	#emitWithText(text: string, build: (shown: string) => MigrationEvent<M>): void {
+		let shown = text;
+		if (this.#redactText !== undefined) {
+			try {
+				shown = String(this.#redactText(text));
+			} catch {
+				// Sending the raw text would defeat the redaction, so the event is dropped instead.
+				return;
+			}
+		}
+		this.#emit(build(shown));
 	}
 
 	#sampled(): boolean {
@@ -313,7 +429,7 @@ export class Migration<M = unknown, F = unknown> {
 }
 
 // One id twice in a call would leave the outcome to the store's batch order, so it is refused for deletes as well as writes.
-function checkEntries(entries: readonly { readonly id: string; readonly version: number }[], operation: "write" | "delete"): void {
+function checkEntries(entries: readonly { readonly id: string; readonly version: number }[], operation: "write" | "delete" | "diff"): void {
 	const seen = new Set<string>();
 	for (const entry of entries) {
 		if (typeof entry.id !== "string" || entry.id === "") {
@@ -352,6 +468,20 @@ async function embed<M, F>(profile: Profile<M, F>, texts: string[]): Promise<num
 		}
 	}
 	return vectors;
+}
+
+async function versions<M, F>(profile: Profile<M, F>, ids: readonly string[]): Promise<(StoredVersion | null)[]> {
+	const result: unknown = await (profile.store.versions as NonNullable<VectorStore<M, F>["versions"]>)([...ids]);
+	if (!Array.isArray(result) || result.length !== ids.length) {
+		const got = Array.isArray(result) ? `${result.length} entries` : typeof result;
+		throw new ArgiaError("invalid_store_result", `profile "${profile.name}" store returned ${got} from versions for ${ids.length} ids`, { profile: profile.name });
+	}
+	for (const entry of result as Partial<StoredVersion>[] | null[]) {
+		if (entry !== null && (typeof entry?.version !== "number" || !Number.isFinite(entry.version) || typeof entry.deleted !== "boolean")) {
+			throw new ArgiaError("invalid_store_result", `profile "${profile.name}" store returned a versions entry that is neither null nor { version, deleted }: ${JSON.stringify(entry)}`, { profile: profile.name });
+		}
+	}
+	return result as (StoredVersion | null)[];
 }
 
 async function search<M, F>(profile: Profile<M, F>, text: string, k: number, filter: F | undefined): Promise<Hit<M>[]> {
