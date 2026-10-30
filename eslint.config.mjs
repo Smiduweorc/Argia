@@ -29,6 +29,12 @@ export default tseslint.config(
 				"error",
 				{ allowTernary: true },
 			],
+		},
+	},
+	{
+		// Plain JavaScript (the built-package tests) cannot declare return types.
+		files: ["**/*.ts"],
+		rules: {
 			"@typescript-eslint/explicit-function-return-type": [
 				"warn",
 				{ allowExpressions: true },

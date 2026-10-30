@@ -8,6 +8,7 @@
 	"include": [
 		"./**/*.ts",
 		"../index.ts",
+		"../conformance.ts",
 		"../src/**/*.ts"
 	],
 	"exclude": [

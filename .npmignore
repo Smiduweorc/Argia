@@ -3,6 +3,7 @@
 /src
 /tests
 /index.ts
+/conformance.ts
 /docs
 node_modules
 eslint*

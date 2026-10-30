@@ -1,14 +1,22 @@
 {
-	"name": "@grml/lib-template",
+	"name": "argia-migrator",
 	"version": "0.0.0",
-	"description": "ESM-friendly TypeScript library template.",
+	"description": "Run two embedding models and their vector stores side by side, and choose when to switch reads to the new one.",
 	"type": "module",
+	"sideEffects": false,
+	"engines": {
+		"node": ">=22"
+	},
 	"main": "dist/index.js",
 	"types": "dist/types/index.d.ts",
 	"exports": {
 		".": {
 			"types": "./dist/types/index.d.ts",
 			"default": "./dist/index.js"
+		},
+		"./conformance": {
+			"types": "./dist/types/conformance.d.ts",
+			"default": "./dist/conformance.js"
 		}
 	},
 	"files": [
@@ -19,31 +27,37 @@
 		"typecheck": "tsc --noEmit && tsc --noEmit -p tests/tsconfig.json",
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
-		"test": "node --import tsx --test \"tests/**/*.test.ts\"",
+		"test": "node --import tsx --test \"tests/*.test.ts\"",
 		"docs": "typedoc",
 		"changelog": "git-cliff -o CHANGELOG.md",
-		"prepare": "lefthook install"
+		"prepare": "lefthook install",
+		"test:dist": "npm run build && node --test \"tests/dist/*.test.mjs\"",
+		"test:pg": "node --import tsx --test \"tests/integration/*.test.ts\""
 	},
 	"keywords": [
-		"typescript",
-		"esm",
-		"template",
-		"library"
+		"rag",
+		"embeddings",
+		"vector",
+		"migration",
+		"dual-write"
 	],
 	"author": "",
 	"license": "ISC",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/grMLEqomlkkU5Eeinz4brIrOVCUCkJuN/lib-template.git"
+		"url": "git+https://github.com/grMLEqomlkkU5Eeinz4brIrOVCUCkJuN/argia.git"
 	},
 	"devDependencies": {
 		"@commitlint/cli": "^21.2.4",
 		"@commitlint/config-conventional": "^21.2.3",
 		"@eslint/js": "^10.0.1",
 		"@types/node": "^26.6.5",
+		"@types/pg": "^8.23.1",
 		"eslint": "^10.13.0",
+		"fast-check": "^4.10.2",
 		"git-cliff": "^2.14.2",
 		"lefthook": "^2.2.2",
+		"pg": "^8.23.1",
 		"tsx": "^4.23.15",
 		"typedoc": "^0.28.20",
 		"typescript": "^6.0.3",
