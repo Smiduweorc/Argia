@@ -1,12 +1,9 @@
 {
 	"name": "argia-migrator",
 	"version": "0.0.0",
-	"description": "Run two embedding models and their vector stores side by side, and choose when to switch reads to the new one.",
+	"description": "Runs two embedding models and their vector stores side by side during a RAG migration: dual writes, sampled comparison, and a cutover you choose. Bring your own stores.",
 	"type": "module",
 	"sideEffects": false,
-	"engines": {
-		"node": ">=22"
-	},
 	"main": "dist/index.js",
 	"types": "dist/types/index.d.ts",
 	"exports": {
@@ -18,6 +15,9 @@
 			"types": "./dist/types/conformance.d.ts",
 			"default": "./dist/conformance.js"
 		}
+	},
+	"engines": {
+		"node": ">=22"
 	},
 	"files": [
 		"dist"
@@ -35,17 +35,19 @@
 		"test:pg": "node --import tsx --test \"tests/integration/*.test.ts\""
 	},
 	"keywords": [
-		"rag",
 		"embeddings",
 		"vector",
+		"rag",
 		"migration",
-		"dual-write"
+		"dual-write",
+		"typescript",
+		"esm"
 	],
-	"author": "",
+	"author": "grml",
 	"license": "ISC",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/grMLEqomlkkU5Eeinz4brIrOVCUCkJuN/argia.git"
+		"url": "git+https://github.com/Smiduweorc/Argia.git"
 	},
 	"devDependencies": {
 		"@commitlint/cli": "^21.2.4",
