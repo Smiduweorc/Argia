@@ -1,0 +1,8 @@
+# Anchored: an unanchored "dist" also ignores tests/dist, which is source.
+/dist
+/docs
+node_modules
+*.log
+.DS_Store
+*.tgz
+.eslintcache
