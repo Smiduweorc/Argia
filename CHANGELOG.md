@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.0] - 2026-10-30
+## [0.3.0] - 2026-11-08
 
 ### Bug Fixes
 
@@ -12,6 +12,12 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - Add overlap metrics, drift detection and unsupported_store error
+
+### Miscellaneous Tasks
+
+- Updated changelog
+- Bumped version for package.json
+- Updated markown and templates
 
 ## [0.1.0] - 2026-10-30
 
