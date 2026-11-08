@@ -2,84 +2,18 @@
 
 ![Argia](assets/logo.png)
 
-**Argia is for RAG projects changing embedding models without a flag day.**
+Argia moves a RAG index from one embedding model to another while it stays
+live. You give it two profiles, each an embedding model plus the vector store
+that holds its vectors. Writes go to both (until the last phase), reads go to
+whichever one the current phase says, and you move the phase forward or back
+with `setPhase`.
 
-You give it two profiles, each an embedding model plus the vector store that
-holds its vectors. Writes go to both; reads go to whichever one the current
-phase says. You move the phase when you are satisfied the new index is good,
-and you can move it back. Argia does not copy existing vectors between
-databases, ship store adapters, or decide when you are ready.
-
-Zero runtime dependencies. ESM only. Nothing runs on import, nothing is
-logged, no environment variables are read.
-
-## Argia is not for you if you
-
-- want to copy vectors from one database to another without re-embedding.
-  Argia always embeds with each profile's own model; a byte copy is a job for
-  your databases' export and import tools.
-- need Argia to share the phase across a fleet. The phase lives in one
-  `Migration` object in one process, so twenty replicas are twenty phases.
-  You can drive them all from a flag or config store you already run; see
-  [Running more than one replica](#running-more-than-one-replica).
-- want retries or timeouts on embedding or store calls. Wrap your `embed` and
-  store methods with Firefly Limiter (`firefly-limiter`), or outside
-  Smiduweorc with `cockatiel` (retries, breakers, timeouts, bulkheads),
-  `p-retry` for retries alone, or `opossum` for a circuit breaker.
-- want Argia to decide when you are ready. The `compare` phase hands you
-  both hit lists and `overlap` turns them into numbers, but which threshold
-  means "ready" is up to you.
-
-## How it works
-
-The phase decides where each call goes:
-
-| phase     | writes go to | queries read | other side queried |
-| --------- | ------------ | ------------ | ------------------ |
-| `from`    | from, to     | from         | no                 |
-| `compare` | from, to     | from         | at `compareRate`   |
-| `to`      | from, to     | to           | no                 |
-| `to-only` | to           | to           | no                 |
-
-- `to` still writes to the old store, so moving back to `from` or `compare`
-  loses nothing. `to-only` stops writing to the old store; after that,
-  going back means re-ingesting.
-- The side being read is the primary, and it is written first. If its write
-  fails, the call throws your error unchanged and the other side is never
-  touched, whatever `shadowWriteFailure` says.
-- The other side is the shadow. `shadowWriteFailure: "throw"` rethrows its
-  failures; `"report"` emits `shadow_write_failed` and lets the call succeed.
-  There is no default, because whether a broken new index may stop ingestion
-  is your call.
-- In `compare`, `compareRate` (0 to 1, required) decides what share of
-  queries also run against the other side. Each compared query reports both
-  hit lists, scores included, through `onEvent`.
-- `backfill` embeds and writes to the `to` profile only, in any phase, so
-  filling the new index does not re-embed everything the old one holds.
-- `writeOrder: "parallel"` (optional) starts both writes at once instead of
-  read side first. A dual write then takes as long as the slower store, not
-  both together. The tradeoff: a write the read side refused may still land
-  on the shadow. The call throws and your retry rewrites the same version,
-  so the stores end up equal.
-- `diff(ids)` asks both stores what they hold for each id and returns the
-  ones that disagree. It is how you find what `shadowWriteFailure: "report"`
-  left behind; see [Finding and repairing gaps](#finding-and-repairing-gaps).
-- `query(text, k, filter)` hands `filter` to your store adapter untouched, on
-  both sides when compared.
-- Every document and delete carries a `version`, and a store keeps the
-  higher one. A backfill of an old copy, or a slow writer, cannot overwrite
-  a newer write, and a write older than a delete cannot bring the document
-  back. Use a revision counter or the source row's last-modified time.
-- Every vector is checked: the count must match the texts, the length must
-  match the profile's `dimensions`, and every value must be finite. Every
-  query result is checked too: an array of at most `k` hits, each with a
-  non-empty string id and a finite score.
-- A listener that throws, or an async listener that rejects, is ignored.
-  Async listeners are not awaited.
+No runtime dependencies. ESM only. Node 24+ (CI runs 24 and 26 on Linux,
+macOS and Windows).
 
 ## Quick start
 
-1. Install: `npm install argia-migrator`. Node 24 or later, ESM only.
+1. Install: `npm install argia-migrator`.
 2. Describe both profiles and choose the failure policy. `openaiEmbed`,
    `cohereEmbed`, `pgvectorStore` and `metrics` stand for your own code:
 
@@ -126,10 +60,9 @@ const migration = new Migration({
   more than agreement at the bottom.
 - `topMatch` and `shared`.
 
-A common starting point is to wait until the median `recall` stays above a
-level you pick over a week of real traffic, then read a sample of the
-queries where it is lowest. The new model can legitimately disagree and be
-right, which is why no number is final.
+One way to decide: wait until the median `recall` stays above a level you
+pick over a week of real traffic, then read a sample of the queries where it
+is lowest. The new model can disagree with the old one and be right.
 
 3. Route your ingestion and retrieval through it (`row`, `chunk` and
    `question` come from your own code):
@@ -159,7 +92,7 @@ queries skip. An adapter that writes unconditionally brings back both races
 the version exists to stop.
 
 Argia does not touch your database, so it cannot see whether your adapter
-does this. `argia-migrator/conformance` checks it for you. Run it in your own
+does this. `argia-migrator/conformance` checks it. Run it in your own
 tests against an empty scratch table or collection:
 
 ```ts
@@ -182,6 +115,63 @@ back, and throws `nonconformant_store` with one line per broken rule. The
 store must return each point's metadata unchanged in its hits; that is how
 the check tells which copy was kept. It leaves its rows and tombstones
 behind.
+
+## Not included
+
+- Copying vectors between databases without re-embedding. Use your
+  databases' export and import tools.
+- A phase shared across replicas. Each `Migration` holds its own; see
+  [Running more than one replica](#running-more-than-one-replica).
+- Retries and timeouts on `embed` and store calls. Wrap them with
+  `firefly-limiter` or `p-retry`.
+- Store adapters, and deciding when the new index is ready. `overlap` gives
+  you numbers; the threshold is yours.
+
+## How it works
+
+The phase decides where each call goes:
+
+| phase     | writes go to | queries read | other side queried |
+| --------- | ------------ | ------------ | ------------------ |
+| `from`    | from, to     | from         | no                 |
+| `compare` | from, to     | from         | at `compareRate`   |
+| `to`      | from, to     | to           | no                 |
+| `to-only` | to           | to           | no                 |
+
+- `to` still writes to the old store, so moving back to `from` or `compare`
+  loses nothing. `to-only` stops writing to the old store; after that,
+  going back means re-ingesting.
+- The side being read is the primary, and it is written first. If its write
+  fails, the call throws your error unchanged and the other side is never
+  touched, whatever `shadowWriteFailure` says.
+- The other side is the shadow. `shadowWriteFailure: "throw"` rethrows its
+  failures; `"report"` emits `shadow_write_failed` and lets the call succeed.
+  There is no default: only you know whether a broken new index may stop
+  ingestion.
+- In `compare`, `compareRate` (0 to 1, required) decides what share of
+  queries also run against the other side. Each compared query reports both
+  hit lists, scores included, through `onEvent`.
+- `backfill` embeds and writes to the `to` profile only, in any phase, so
+  filling the new index does not re-embed everything the old one holds.
+- `writeOrder: "parallel"` (optional) starts both writes at once instead of
+  read side first. A dual write then takes as long as the slower store. A
+  write the read side refused may still land on the shadow; the call throws
+  and your retry rewrites the same version, so the stores end up equal.
+- `diff(ids)` asks both stores what they hold for each id and returns the
+  ones that disagree. It is how you find what `shadowWriteFailure: "report"`
+  left behind; see [Finding and repairing gaps](#finding-and-repairing-gaps).
+- `query(text, k, filter)` hands `filter` to your store adapter untouched, on
+  both sides when compared.
+- Every document and delete carries a `version`, and a store keeps the
+  higher one. A backfill of an old copy, or a slow writer, cannot overwrite
+  a newer write, and a write older than a delete cannot bring the document
+  back. Use a revision counter or the source row's last-modified time.
+- Every vector is checked: the count must match the texts, the length must
+  match the profile's `dimensions`, and every value must be finite. Every
+  query result is checked too: an array of at most `k` hits, each with a
+  non-empty string id and a finite score.
+- A listener that throws, or an async listener that rejects, is ignored.
+  Async listeners are not awaited.
 
 ## Finding and repairing gaps
 
@@ -218,10 +208,9 @@ the pgvector fixture implements it.
 ## Running more than one replica
 
 Argia has no shared phase, but `setPhase` is a plain method, so you can
-drive it from a feature-flag service, a config service, a database row,
-Redis, etcd or Consul. Each replica reads the shared value before
-constructing `Migration` (pass it as `phase`), then polls or subscribes
-and calls `setPhase` when it changes.
+drive it from a feature flag, a config service or a database row. Each
+replica reads the shared value before constructing `Migration` (pass it as
+`phase`), then polls or subscribes and calls `setPhase` when it changes.
 
 Propagation is never atomic. Replicas learn about a change at different
 times, depending on the poll interval, pub/sub lag and requests already in
@@ -231,7 +220,7 @@ transition is dangerous:
 - `from`, `compare` and `to` all write to both stores, so replicas can move
   between them in any order. While replicas disagree, they read from
   different sides, but both sides stay current.
-- `to-only` is the cliff. Once one replica stops writing to the old store,
+- `to-only` is the risky one. Once one replica stops writing to the old store,
   any replica still reading from it serves stale results.
 
 So:
@@ -248,11 +237,9 @@ So:
 4. Validate the value before calling `setPhase`. An unknown phase throws.
 
 You can also skip `to-only`. `to` already reads from the new index and
-keeps the old one as a safety net. All `to-only` saves you is the second
-write and its embedding cost. If that cost is tolerable, stay in `to` and
-retire the old store with an ordinary deploy that removes the `from`
-profile. That deploy has its own rollout, but your deploy tooling already
-knows how to handle it.
+keeps the old one written. All `to-only` saves you is the second write and
+its embedding cost. If that cost is tolerable, stay in `to` and retire the
+old store with an ordinary deploy that removes the `from` profile.
 
 ## Compare events and sensitive queries
 
@@ -267,14 +254,12 @@ import { createHash } from "node:crypto";
 redactText: (text) => createHash("sha256").update(text).digest("hex").slice(0, 16),
 ```
 
-If `redactText` throws, the event is dropped rather than sent with the raw
-text.
+If `redactText` throws, the event is dropped, not sent with the raw text.
 
 ## Where it sits
 
 We found no other library that does this job, though we have not searched
-exhaustively. The pattern exists as a written procedure, and Argia turns
-that procedure into code that runs against any store.
+exhaustively. The closest things:
 
 - [Qdrant's migration tutorial](https://qdrant.tech/documentation/tutorials-operations/embedding-model-migration/)
   lays out the same steps by hand for Qdrant: a second collection, dual
@@ -290,7 +275,7 @@ that procedure into code that runs against any store.
 
 - By default the two writes run one after the other, so a dual write takes
   as long as both together. That ordering is what keeps a refused write out
-  of the shadow store. `writeOrder: "parallel"` trades that guarantee for
+  of the shadow store. `writeOrder: "parallel"` drops that for lower
   latency.
 - If the primary write succeeds and the shadow write fails, the shadow store
   misses those documents until they are written again, which is why upserts
@@ -309,29 +294,6 @@ that procedure into code that runs against any store.
   the call yourself if your provider caps the batch.
 - No benchmarks yet.
 
-## Scripts
-
-| Script | What it does |
-| --- | --- |
-| `npm run build` | Compile to `dist/` with type declarations. |
-| `npm run typecheck` | Type-check the source and the tests, including the compile-fail fixtures in `tests/types/`. |
-| `npm run lint` | Run ESLint. |
-| `npm test` | Run the suite against the source. |
-| `npm run test:dist` | Build, then test the built package through its own name. |
-| `npm run test:pg` | Run the pgvector adapter, the conformance check and a full migration against Postgres at `ARGIA_PG_URL`. |
-| `npm run docs` | Generate the API docs into `docs/`. |
-| `npm run changelog` | Regenerate `CHANGELOG.md` with git-cliff. |
-
-For `test:pg`, start pgvector and point the tests at it:
-
-```sh
-docker run -d --name argia-pg -e POSTGRES_PASSWORD=argia -p 54329:5432 pgvector/pgvector:pg17
-ARGIA_PG_URL=postgres://postgres:argia@localhost:54329/postgres npm run test:pg
-```
-
-Publishing is manual; `./release.sh vX.Y.Z` bumps, writes the changelog and
-tags.
-
 ## Licence
 
 ISC.
@@ -342,5 +304,3 @@ Argia are the dancer damselflies. They spend their larval life underwater and
 their adult life in the air, and the move from one to the other happens in the
 final molt, on a reed stem. The old skin stays clinging to the reed for a
 while afterwards, which is the `to` phase.
-
-
