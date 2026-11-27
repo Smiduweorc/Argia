@@ -1,69 +1,69 @@
 {
-  "name": "argia-migrator",
-  "version": "0.3.2",
-  "description": "Runs two embedding models and their vector stores side by side during a RAG migration: dual writes, sampled comparison, and a cutover you choose. Bring your own stores.",
-  "type": "module",
-  "sideEffects": false,
-  "main": "dist/index.js",
-  "types": "dist/types/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/types/index.d.ts",
-      "default": "./dist/index.js"
-    },
-    "./conformance": {
-      "types": "./dist/types/conformance.d.ts",
-      "default": "./dist/conformance.js"
-    }
-  },
-  "engines": {
-    "node": ">=24"
-  },
-  "files": [
-    "dist"
-  ],
-  "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tests/tsconfig.json",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
-    "test": "node --import tsx --test \"tests/*.test.ts\"",
-    "docs": "typedoc",
-    "changelog": "git-cliff -o CHANGELOG.md",
-    "prepare": "lefthook install",
-    "test:dist": "npm run build && node --test \"tests/dist/*.test.mjs\"",
-    "test:pg": "node --import tsx --test \"tests/integration/*.test.ts\""
-  },
-  "keywords": [
-    "embeddings",
-    "vector",
-    "rag",
-    "migration",
-    "dual-write",
-    "typescript",
-    "esm",
-    "smiduweorc"
-  ],
-  "author": "grml",
-  "license": "ISC",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Smiduweorc/Argia.git"
-  },
-  "devDependencies": {
-    "@commitlint/cli": "^21.2.4",
-    "@commitlint/config-conventional": "^21.2.3",
-    "@eslint/js": "^10.0.1",
-    "@types/node": "^26.6.5",
-    "@types/pg": "^8.23.1",
-    "eslint": "^10.13.0",
-    "fast-check": "^4.10.2",
-    "git-cliff": "^2.14.2",
-    "lefthook": "^2.2.2",
-    "pg": "^8.23.1",
-    "tsx": "^4.23.15",
-    "typedoc": "^0.28.20",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.72.1"
-  }
+	"name": "argia-migrator",
+	"version": "0.3.2",
+	"description": "Runs two embedding models and their vector stores side by side during a RAG migration: dual writes, sampled comparison, and a cutover you choose. Bring your own stores.",
+	"type": "module",
+	"sideEffects": false,
+	"main": "dist/index.js",
+	"types": "dist/types/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/types/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./conformance": {
+			"types": "./dist/types/conformance.d.ts",
+			"default": "./dist/conformance.js"
+		}
+	},
+	"engines": {
+		"node": ">=24"
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tests/tsconfig.json",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix",
+		"test": "node --import tsx --test \"tests/*.test.ts\"",
+		"docs": "typedoc",
+		"changelog": "git-cliff -o CHANGELOG.md",
+		"prepare": "lefthook install",
+		"test:dist": "npm run build && node --test \"tests/dist/*.test.mjs\"",
+		"test:pg": "node --import tsx --test \"tests/integration/*.test.ts\""
+	},
+	"keywords": [
+		"embeddings",
+		"vector",
+		"rag",
+		"migration",
+		"dual-write",
+		"typescript",
+		"esm",
+		"smiduweorc"
+	],
+	"author": "grml",
+	"license": "ISC",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Smiduweorc/Argia.git"
+	},
+	"devDependencies": {
+		"@commitlint/cli": "^21.2.4",
+		"@commitlint/config-conventional": "^21.2.3",
+		"@eslint/js": "^10.0.1",
+		"@types/node": "^26.6.5",
+		"@types/pg": "^8.23.1",
+		"eslint": "^10.13.0",
+		"fast-check": "^4.10.2",
+		"git-cliff": "^2.14.2",
+		"lefthook": "^2.2.2",
+		"pg": "^8.23.1",
+		"tsx": "^4.23.15",
+		"typedoc": "^0.28.20",
+		"typescript": "^6.0.3",
+		"typescript-eslint": "^8.72.1"
+	}
 }
